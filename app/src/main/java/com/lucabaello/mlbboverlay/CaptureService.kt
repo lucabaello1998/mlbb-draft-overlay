@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.PowerManager
 
 /**
  * Servicio en primer plano que sostiene la proyección de pantalla y la burbuja.
@@ -56,7 +57,8 @@ class CaptureService : Service() {
     private val bucle = object : Runnable {
         override fun run() {
             if (!auto) return
-            if (!ocupado) capturar(automatico = true)
+            // Con la pantalla apagada no hay nada que leer: no gastamos bateria.
+            if (!ocupado && pantallaEncendida()) capturar(automatico = true)
             manejador?.postDelayed(this, segundos * 1000L)
         }
     }
@@ -191,21 +193,41 @@ class CaptureService : Service() {
 
     /** Un frame del display que ya está espejando. */
     private fun capturarPantalla(): Bitmap? {
-        val lector = this.lector ?: return null
         if (!prepararDisplay()) return null
-
+        val lector = this.lector ?: return null
         val metricas = resources.displayMetrics
+        val ancho = metricas.widthPixels
+        val alto = metricas.heightPixels
+
         var imagen: Image? = null
+        try {
+            imagen = esperarImagen(lector) ?: return null
+            return convertir(imagen, ancho, alto)
+        } catch (error: IllegalStateException) {
+            // La cola del lector se llenó (maxImages): se rehace y se sigue.
+            android.util.Log.e("mlbb", "cola de imágenes llena, reinicio el lector", error)
+            reiniciarLector()
+            return null
+        } finally {
+            // Cerrar SIEMPRE: una imagen sin cerrar ocupa un slot y a la tercera
+            // el lector deja de entregar frames.
+            runCatching { imagen?.close() }
+        }
+    }
+
+    private fun esperarImagen(lector: ImageReader): Image? {
         val limite = System.currentTimeMillis() + 2000
         while (System.currentTimeMillis() < limite) {
-            imagen = lector.acquireLatestImage()
-            if (imagen != null) break
+            val imagen = lector.acquireLatestImage()
+            if (imagen != null) return imagen
             Thread.sleep(20)
         }
+        return null
+    }
 
-        val bitmap = imagen?.let { convertir(it, metricas.widthPixels, metricas.heightPixels) }
-        imagen?.close()
-        return bitmap
+    private fun reiniciarLector() {
+        soltarDisplay()
+        prepararDisplay()
     }
 
     private fun convertir(imagen: Image, ancho: Int, alto: Int): Bitmap {
@@ -214,7 +236,10 @@ class CaptureService : Service() {
         val pixelStride = plano.pixelStride
         val rowStride = plano.rowStride
         val relleno = rowStride - pixelStride * ancho
-        val anchoReal = ancho + relleno / pixelStride
+        // Si el relleno viniera negativo, el bitmap tendría menos píxeles que el
+        // buffer y copyPixelsFromBuffer explotaría: en ese caso se usa el ancho
+        // tal cual.
+        val anchoReal = if (relleno > 0) ancho + relleno / pixelStride else ancho
 
         val bitmap = Bitmap.createBitmap(anchoReal, alto, Bitmap.Config.ARGB_8888)
         bitmap.copyPixelsFromBuffer(buffer)
@@ -226,6 +251,9 @@ class CaptureService : Service() {
         val escala = maxAncho.toFloat() / bitmap.width
         return Bitmap.createScaledBitmap(bitmap, maxAncho, (bitmap.height * escala).toInt(), true)
     }
+
+    private fun pantallaEncendida(): Boolean =
+        getSystemService(PowerManager::class.java)?.isInteractive ?: true
 
     private fun cortarAuto(motivo: String) {
         auto = false
