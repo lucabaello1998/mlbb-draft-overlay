@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MLBB Draft</string>
+    <string name="canal_nombre">Captura de draft</string>
+    <string name="notificacion_titulo">MLBB Draft activo</string>
+    <string name="notificacion_texto">Tocá la burbuja sobre el juego para leer el draft.</string>
+    <string name="notificacion_detener">Detener</string>
+</resources>
