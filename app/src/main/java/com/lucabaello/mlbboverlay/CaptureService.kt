@@ -12,6 +12,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
+import android.hardware.display.VirtualDisplay
 import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
@@ -24,9 +25,9 @@ import android.os.IBinder
 /**
  * Servicio en primer plano que sostiene la proyección de pantalla y la burbuja.
  *
- * La captura NO es continua por defecto: el VirtualDisplay se crea cuando tocás
- * la burbuja, se toma un frame y se libera. Con el análisis automático activado,
- * el mismo ciclo se repite cada N segundos.
+ * El VirtualDisplay se crea UNA vez al iniciar y se reutiliza: crear y liberar
+ * uno por captura terminaba matando la proyección en algunos teléfonos. Entre
+ * capturas no se procesa nada; el display sólo espeja la pantalla.
  */
 class CaptureService : Service() {
 
@@ -36,13 +37,18 @@ class CaptureService : Service() {
         const val EXTRA_DATOS = "datos"
         private const val CANAL = "captura"
         private const val NOTIFICACION = 42
+        private const val MAX_FALLOS = 3
     }
 
     private var proyeccion: MediaProjection? = null
+    private var lector: ImageReader? = null
+    private var display: VirtualDisplay? = null
     private var burbuja: OverlayController? = null
     private var hilo: HandlerThread? = null
     private var manejador: Handler? = null
+
     private var ocupado = false
+    private var fallosSeguidos = 0
 
     private var auto = false
     private var segundos = 5
@@ -79,6 +85,7 @@ class CaptureService : Service() {
         }
 
         iniciarPrimerPlano()
+
         val manager = getSystemService(MediaProjectionManager::class.java)
         proyeccion = manager.getMediaProjection(codigo, datos)?.also { proyeccionActiva ->
             proyeccionActiva.registerCallback(
@@ -96,9 +103,47 @@ class CaptureService : Service() {
         val prefs = getSharedPreferences("mlbb", Context.MODE_PRIVATE)
         auto = prefs.getBoolean("auto", false)
         segundos = prefs.getInt("segundos", 5).coerceIn(2, 60)
-        if (auto) manejador?.postDelayed(bucle, segundos * 1000L)
+
+        // El display se arma una sola vez, acá, antes de la primera captura.
+        manejador?.post {
+            if (!prepararDisplay()) {
+                burbuja?.mostrarPanel(
+                    "No se pudo preparar la captura de pantalla.\nCerrá la app y volvé a iniciar.",
+                    "Sin captura"
+                )
+                return@post
+            }
+            if (auto) manejador?.postDelayed(bucle, segundos * 1000L)
+        }
 
         return START_STICKY
+    }
+
+    private fun prepararDisplay(): Boolean {
+        if (lector != null && display != null) return true
+        val proyeccion = this.proyeccion ?: return false
+        return try {
+            val metricas = resources.displayMetrics
+            val ancho = metricas.widthPixels
+            val alto = metricas.heightPixels
+            val nuevoLector = ImageReader.newInstance(ancho, alto, PixelFormat.RGBA_8888, 3)
+            val nuevoDisplay = proyeccion.createVirtualDisplay(
+                "mlbb-draft",
+                ancho,
+                alto,
+                metricas.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                nuevoLector.surface,
+                null,
+                null
+            )
+            lector = nuevoLector
+            display = nuevoDisplay
+            true
+        } catch (error: Throwable) {
+            android.util.Log.e("mlbb", "no se pudo preparar el display", error)
+            false
+        }
     }
 
     private fun capturar(automatico: Boolean = false) {
@@ -110,16 +155,21 @@ class CaptureService : Service() {
             try {
                 val bitmap = capturarPantalla()
                 if (bitmap == null) {
+                    fallosSeguidos += 1
+                    if (!automatico || fallosSeguidos >= MAX_FALLOS) cortarAuto("no pude capturar la pantalla")
                     if (!automatico) {
                         burbuja?.mostrarPanel("No pude capturar la pantalla.\nVolvé a iniciar la app.", "Sin captura")
                     }
                     ocupado = false
                     return@post
                 }
-                val reducido = reducir(bitmap, 1200)
-                OcrAnalisis.analizar(reducido, bitmap.height) { resultado ->
-                    // En automático sólo aparece cuando hay draft: no querés un cartel
-                    // tapando el juego cada 5 segundos.
+
+                fallosSeguidos = 0
+                val entrada = reducir(bitmap, 1000)
+                if (entrada !== bitmap) bitmap.recycle()
+
+                OcrAnalisis.analizar(entrada, entrada.height) { resultado ->
+                    runCatching { entrada.recycle() }
                     if (automatico && resultado.heroes.isEmpty()) {
                         burbuja?.ocultarPanel()
                     } else {
@@ -127,43 +177,34 @@ class CaptureService : Service() {
                     }
                     ocupado = false
                 }
-            } catch (error: Exception) {
-                if (!automatico) burbuja?.mostrarPanel("Error al capturar: ${error.message}", "Error")
+            } catch (error: Throwable) {
+                android.util.Log.e("mlbb", "captura fallida", error)
+                fallosSeguidos += 1
+                if (fallosSeguidos >= MAX_FALLOS) cortarAuto("error al leer la pantalla")
+                if (!automatico) {
+                    burbuja?.mostrarPanel("Error al capturar: ${error.message}", "Error")
+                }
                 ocupado = false
             }
         }
     }
 
-    /** Un solo frame: se crea el display virtual, se toma la imagen y se libera. */
+    /** Un frame del display que ya está espejando. */
     private fun capturarPantalla(): Bitmap? {
-        val proyeccion = this.proyeccion ?: return null
+        val lector = this.lector ?: return null
+        if (!prepararDisplay()) return null
+
         val metricas = resources.displayMetrics
-        val ancho = metricas.widthPixels
-        val alto = metricas.heightPixels
-
-        val lector = ImageReader.newInstance(ancho, alto, PixelFormat.RGBA_8888, 2)
-        val display = proyeccion.createVirtualDisplay(
-            "mlbb-draft",
-            ancho,
-            alto,
-            metricas.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            lector.surface,
-            null,
-            null
-        )
-
         var imagen: Image? = null
-        val limite = System.currentTimeMillis() + 2500
-        while (System.currentTimeMillis() < limite && imagen == null) {
+        val limite = System.currentTimeMillis() + 2000
+        while (System.currentTimeMillis() < limite) {
             imagen = lector.acquireLatestImage()
-            if (imagen == null) Thread.sleep(25)
+            if (imagen != null) break
+            Thread.sleep(20)
         }
 
-        val bitmap = imagen?.let { convertir(it, ancho, alto) }
+        val bitmap = imagen?.let { convertir(it, metricas.widthPixels, metricas.heightPixels) }
         imagen?.close()
-        display.release()
-        lector.close()
         return bitmap
     }
 
@@ -184,6 +225,15 @@ class CaptureService : Service() {
         if (bitmap.width <= maxAncho) return bitmap
         val escala = maxAncho.toFloat() / bitmap.width
         return Bitmap.createScaledBitmap(bitmap, maxAncho, (bitmap.height * escala).toInt(), true)
+    }
+
+    private fun cortarAuto(motivo: String) {
+        auto = false
+        manejador?.removeCallbacks(bucle)
+        burbuja?.mostrarPanel(
+            "Se cortó el análisis automático: $motivo.\n\nPodés seguir usando la burbuja a mano.",
+            "Auto detenido"
+        )
     }
 
     private fun iniciarPrimerPlano() {
@@ -214,7 +264,11 @@ class CaptureService : Service() {
             .setSmallIcon(R.drawable.ic_launcher)
             .setOngoing(true)
             .addAction(
-                Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher), getString(R.string.notificacion_detener), detener).build()
+                Notification.Action.Builder(
+                    android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher),
+                    getString(R.string.notificacion_detener),
+                    detener
+                ).build()
             )
             .build()
 
@@ -225,11 +279,19 @@ class CaptureService : Service() {
         }
     }
 
+    private fun soltarDisplay() {
+        runCatching { display?.release() }
+        display = null
+        runCatching { lector?.close() }
+        lector = null
+    }
+
     private fun detener() {
         auto = false
         manejador?.removeCallbacks(bucle)
         burbuja?.cerrar()
         burbuja = null
+        soltarDisplay()
         runCatching { proyeccion?.stop() }
         proyeccion = null
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -241,6 +303,7 @@ class CaptureService : Service() {
         manejador?.removeCallbacks(bucle)
         burbuja?.cerrar()
         burbuja = null
+        soltarDisplay()
         runCatching { proyeccion?.stop() }
         proyeccion = null
         hilo?.quitSafely()

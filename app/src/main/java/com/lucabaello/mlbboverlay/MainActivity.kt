@@ -109,6 +109,24 @@ class MainActivity : Activity() {
         raiz.addView(botonIniciar)
         raiz.addView(detener)
         raiz.addView(filaAuto)
+
+        val ultimo = Aplicacion.ultimoError(this)
+        if (ultimo != null) {
+            val caja = TextView(this).apply {
+                text = "Último error:\n${ultimo.take(700)}"
+                setTextColor(Color.parseColor("#ef4444"))
+                textSize = 10f
+                setPadding(0, dp(18), 0, dp(6))
+            }
+            raiz.addView(caja)
+            raiz.addView(
+                boton("Borrar log de error") {
+                    Aplicacion.limpiarError(this)
+                    caja.text = "Log borrado."
+                }
+            )
+        }
+
         setContentView(raiz)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
