@@ -1,6 +1,7 @@
 package com.lucabaello.mlbboverlay
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -9,8 +10,11 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.text.InputType
 import android.widget.Button
+import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.Switch
 import android.widget.TextView
 
 class MainActivity : Activity() {
@@ -21,6 +25,8 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val prefs = getSharedPreferences("mlbb", Context.MODE_PRIVATE)
 
         val raiz = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -39,18 +45,62 @@ class MainActivity : Activity() {
             text = "Burbuja sobre el juego: la tocás, lee la pantalla de draft y te muestra los counters."
             setTextColor(Color.parseColor("#8b95a7"))
             textSize = 14f
-            setPadding(0, dp(10), 0, dp(28))
+            setPadding(0, dp(10), 0, dp(24))
         }
 
         estado = TextView(this).apply {
             setTextColor(Color.parseColor("#d4af37"))
             textSize = 13f
-            setPadding(0, 0, 0, dp(18))
+            setPadding(0, 0, 0, dp(16))
         }
 
         botonPermiso = boton("1. Permitir dibujar sobre otras apps") { pedirOverlay() }
         botonIniciar = boton("2. Iniciar captura") { pedirCaptura() }
         val detener = boton("Detener") { detenerServicio() }
+
+        val filaAuto = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(0, dp(4), 0, dp(12))
+        }
+
+        val interruptor = Switch(this).apply {
+            text = "Analizar solo cada"
+            setTextColor(Color.parseColor("#e7ecf3"))
+            textSize = 14f
+            isChecked = prefs.getBoolean("auto", false)
+        }
+
+        val segundos = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER
+            setText(prefs.getInt("segundos", 5).toString())
+            setTextColor(Color.parseColor("#e7ecf3"))
+            textSize = 14f
+            setBackgroundColor(Color.parseColor("#1a2030"))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+        }
+
+        val sufijo = TextView(this).apply {
+            text = " s"
+            setTextColor(Color.parseColor("#8b95a7"))
+            textSize = 14f
+        }
+
+        fun guardar() {
+            val valor = segundos.text.toString().toIntOrNull()?.coerceIn(2, 60) ?: 5
+            segundos.setText(valor.toString())
+            prefs.edit().putBoolean("auto", interruptor.isChecked).putInt("segundos", valor).apply()
+            if (interruptor.isChecked) {
+                estado.text = "Auto: cada $valor s mientras la captura esté activa."
+            }
+        }
+
+        interruptor.setOnCheckedChangeListener { _, _ -> guardar() }
+        segundos.setOnFocusChangeListener { _, tieneFoco -> if (!tieneFoco) guardar() }
+
+        filaAuto.addView(interruptor, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        filaAuto.addView(segundos, LinearLayout.LayoutParams(dp(64), LinearLayout.LayoutParams.WRAP_CONTENT))
+        filaAuto.addView(sufijo)
 
         raiz.addView(titulo)
         raiz.addView(bajada)
@@ -58,6 +108,7 @@ class MainActivity : Activity() {
         raiz.addView(botonPermiso)
         raiz.addView(botonIniciar)
         raiz.addView(detener)
+        raiz.addView(filaAuto)
         setContentView(raiz)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -87,9 +138,7 @@ class MainActivity : Activity() {
             actualizarEstado()
             return
         }
-        startActivity(
-            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-        )
+        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
     }
 
     private fun pedirCaptura() {

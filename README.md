@@ -31,8 +31,22 @@ vs Hanabi: ...
 1. **Burbuja flotante** (`SYSTEM_ALERT_WINDOW`) siempre arriba del juego.
 2. Tocás la burbuja → **MediaProjection** captura **un solo frame** y lo suelta.
 3. **ML Kit** lee el texto de la captura (modelo offline, dentro del APK).
-4. Se buscan los nombres de los héroes, se separan por posición (arriba aliados,
-   abajo enemigos) y se arma el informe con los counters del dataset.
+4. Se buscan los nombres de los héroes, se separan en dos filas por el salto
+   vertical más grande y se arma el informe con los counters del dataset.
+
+**Nada se cierra al tocar.** La burbuja nunca apaga el servicio: si tocás la
+burbuja con el panel abierto, se vuelve a analizar en el mismo panel. El botón
+**—** de la cabecera sólo lo minimiza (la burbuja sigue), y con un toque largo
+en la burbuja lo mostrás de nuevo. Para apagar todo hay que usar *Detener* en la
+app o en la notificación.
+
+**Análisis automático** (opcional, apagado por defecto): en la pantalla
+principal se activa y se elige cada cuántos segundos (2 a 60). En ese modo el
+panel **sólo aparece cuando hay un draft**: si estás en otra pantalla no muestra
+nada, no molesta.
+
+Si la captura no es la pantalla de carga, el panel dice **"No hay pantalla de
+carga detectada"** con lo que alcanzó a leer, en vez de cerrarse.
 
 La captura **no es continua**: entre toques la app no consume CPU ni GPU. Lo
 único que queda es la burbuja y una notificación, que es lo que Android exige

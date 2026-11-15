@@ -6,6 +6,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
@@ -23,8 +24,9 @@ import android.os.IBinder
 /**
  * Servicio en primer plano que sostiene la proyección de pantalla y la burbuja.
  *
- * La captura NO es continua: el VirtualDisplay se crea cuando tocás la burbuja,
- * se toma un frame y se libera. Entre toques la app no consume CPU ni GPU.
+ * La captura NO es continua por defecto: el VirtualDisplay se crea cuando tocás
+ * la burbuja, se toma un frame y se libera. Con el análisis automático activado,
+ * el mismo ciclo se repite cada N segundos.
  */
 class CaptureService : Service() {
 
@@ -41,6 +43,17 @@ class CaptureService : Service() {
     private var hilo: HandlerThread? = null
     private var manejador: Handler? = null
     private var ocupado = false
+
+    private var auto = false
+    private var segundos = 5
+
+    private val bucle = object : Runnable {
+        override fun run() {
+            if (!auto) return
+            if (!ocupado) capturar(automatico = true)
+            manejador?.postDelayed(this, segundos * 1000L)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -79,29 +92,43 @@ class CaptureService : Service() {
         }
 
         burbuja = OverlayController(this) { capturar() }.also { it.mostrar() }
+
+        val prefs = getSharedPreferences("mlbb", Context.MODE_PRIVATE)
+        auto = prefs.getBoolean("auto", false)
+        segundos = prefs.getInt("segundos", 5).coerceIn(2, 60)
+        if (auto) manejador?.postDelayed(bucle, segundos * 1000L)
+
         return START_STICKY
     }
 
-    private fun capturar() {
+    private fun capturar(automatico: Boolean = false) {
         if (ocupado) return
         ocupado = true
-        burbuja?.mostrarCargando()
+        if (!automatico) burbuja?.mostrarCargando()
 
         manejador?.post {
             try {
                 val bitmap = capturarPantalla()
                 if (bitmap == null) {
-                    burbuja?.mostrarPanel("No pude capturar la pantalla.\nCerrá y volvé a iniciar la app.")
+                    if (!automatico) {
+                        burbuja?.mostrarPanel("No pude capturar la pantalla.\nVolvé a iniciar la app.", "Sin captura")
+                    }
                     ocupado = false
                     return@post
                 }
                 val reducido = reducir(bitmap, 1200)
-                OcrAnalisis.analizar(reducido, bitmap.height) { texto ->
-                    burbuja?.mostrarPanel(texto)
+                OcrAnalisis.analizar(reducido, bitmap.height) { resultado ->
+                    // En automático sólo aparece cuando hay draft: no querés un cartel
+                    // tapando el juego cada 5 segundos.
+                    if (automatico && resultado.heroes.isEmpty()) {
+                        burbuja?.ocultarPanel()
+                    } else {
+                        burbuja?.mostrarPanel(resultado.informe, resultado.estado)
+                    }
                     ocupado = false
                 }
             } catch (error: Exception) {
-                burbuja?.mostrarPanel("Error al capturar: ${error.message}")
+                if (!automatico) burbuja?.mostrarPanel("Error al capturar: ${error.message}", "Error")
                 ocupado = false
             }
         }
@@ -187,7 +214,7 @@ class CaptureService : Service() {
             .setSmallIcon(R.drawable.ic_launcher)
             .setOngoing(true)
             .addAction(
-                Notification.Action.Builder(null, getString(R.string.notificacion_detener), detener).build()
+                Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(this, R.drawable.ic_launcher), getString(R.string.notificacion_detener), detener).build()
             )
             .build()
 
@@ -199,6 +226,8 @@ class CaptureService : Service() {
     }
 
     private fun detener() {
+        auto = false
+        manejador?.removeCallbacks(bucle)
         burbuja?.cerrar()
         burbuja = null
         runCatching { proyeccion?.stop() }
@@ -208,6 +237,8 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+        auto = false
+        manejador?.removeCallbacks(bucle)
         burbuja?.cerrar()
         burbuja = null
         runCatching { proyeccion?.stop() }
